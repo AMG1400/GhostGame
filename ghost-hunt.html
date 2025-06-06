@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ghost Hunt Game - Timer & Win Condition</title>
+<script src="//codepen.io/steveg3003/pen/zBVakw.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/snap.svg/0.4.1/snap.svg-min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/rxjs/5.0.1/Rx.min.js"></script>
+<style>
+  @import 'https://fonts.googleapis.com/css?family=Catamaran';
+
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    font-family: 'Catamaran', sans-serif;
+    overflow: hidden;
+    background: #111 url('images/graveyard.png') no-repeat center center/cover;
+  }
+
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* Heaven area top */
+  #heaven {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 12%;
+    background: linear-gradient(to bottom, #ccefff, #7ec4e6);
+    box-shadow: 0 0 30px 15px #aaddff;
+    z-index: 20;
+    pointer-events: none;
+  }
+  #heaven-text {
+    position: absolute;
+    top: 4px;
+    width: 100%;
+    text-align: center;
+    font-weight: bold;
+    color: #3a78a1;
+    text-shadow: 0 0 4px #ccefff;
+    font-size: 1.5em;
+    user-select: none;
+    pointer-events: none;
+    z-index: 21;
+  }
+
+  /* Timer display */
+  #timer {
+    position: absolute;
+    top: 15px;
+    right: 20px;
+    font-size: 1.5em;
+    color: white;
+    font-weight: bold;
+    z-index: 30;
+    user-select: none;
+    text-shadow: 0 0 5px black;
+  }
+
+  /* Game over overlay */
+  #game-over {
+    display: none;
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.9);
+    color: #fff;
+    font-size: 2em;
+    text-align: center;
+    padding-top: 25vh;
+    z-index: 1000;
+  }
+
+  #game-over button {
+    margin-top: 20px;
+    font-size: 1.2em;
+    padding: 10px 30px;
+    cursor: pointer;
+    background: #3a78a1;
+    border: none;
+    border-radius: 8px;
+    color: white;
+    box-shadow: 0 0 10px #5a9fd8;
+  }
+  #game-over button:hover {
+    background: #5a9fd8;
+  }
+
+  svg {
+    position: relative;
+    z-index: 15;
+    -webkit-backface-visibility: hidden;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+
+  <!-- Heaven bar top -->
+  <div id="heaven"></div>
+  <div id="heaven-text">Keep the ghosts from escaping!</div>
+
+  <!-- Timer display -->
+  <div id="timer">Time Left: 02:00</div>
+
+  <!-- Ghost SVG container -->
+  <svg id="svg"></svg>
+
+  <!-- Game over screen -->
+  <div id="game-over">
+    <div id="game-over-text"></div>
+    <button id="restart-btn">Restart</button>
+  </div>
+
+</div>
+
+<script>
+  'use strict';
+
+  class U {
+    static randomFromRange(min, max) {
+      return Math.floor(Math.random() * (max - min + 1) + min);
+    }
+    static colors = [
+      '#0F5257', '#FF6978', '#A7FFF6', '#507DBC',
+      '#98DFEA', '#69FFF1', '#EEEEEE', '#FFFFFF', '#EEEEEE', '#FFFFFF'
+    ];
+    static translate(x = 0, y = 0) { return `translate(${x}, ${y})`; }
+    static within(min, target, max) { return Math.min(Math.max(min, target), max); }
+    static mouseEventToCoordinate(mouseEvent) {
+      return { x: mouseEvent.clientX, y: mouseEvent.clientY };
+    }
+    static touchEventToCoordinate(touchEvent) {
+      return { x: touchEvent.changedTouches[0].clientX, y: touchEvent.changedTouches[0].clientY };
+    }
+    static createPath(points, offset = { x: 0, y: 0 }, percentageContainer) {
+      let path = '';
+      for (let i = 0; i < points.length; i++) {
+        let p = points[i];
+        path += p.type ? p.type : i == 0 ? '' : ', ';
+        if (percentageContainer)
+          path += offset.x + (p.x / 100) * percentageContainer.width + ' ' + (offset.y + (p.y / 100) * percentageContainer.height);
+        else path += offset.x + p.x + ' ' + (offset.y + p.y);
+      }
+      return path;
+    }
+  }
+
+  class Game {
+    constructor() {
+      this.PLAYER_SPEED = 12;
+      this.PLAYER_SPEED_STEP = 1;
+      this.width = 0;
+      this.height = 0;
+      this.ghosts = [];
+      this.stagePadding = 20;
+      this.playerCurrentSpeed = 0;
+      this.playerTargetSpeed = 0;
+      this.caughtGhost = null;
+      this.ghostsSaved = 0;
+      this.gameOverFlag = false;
+
+      // Timer related
+      this.totalTimeSeconds = 120; // 2 minutes
+      this.remainingTime = this.totalTimeSeconds;
+      this.timerInterval = null;
+
+      this.container = document.getElementById('container');
+      this.stage = Snap('#svg');
+      this.player = new Player(this.stage);
+
+      this.onResize();
+      this.spawnInitialGhosts();
+
+      this.resize = Rx.Observable.fromEvent(window, 'resize');
+      this.resize.subscribe(() => this.onResize());
+
+      this.setupInputs();
+
+      this.spawnInterval = setInterval(() => {
+        if(!this.gameOverFlag) this.spawnNewGhosts(2);
+      }, 10000);
+    }
+
+    spawnInitialGhosts() {
+      let pad = this.stagePadding * 2;
+      let minY = this.height * 0.8;
+      let maxY = this.height - pad;
+      for (let i = 0; i < 5; i++)
+        this.ghosts.push(
+          new Ghost(
+            this.stage,
+            this.stagePadding + Math.round(Math.random() * (this.width - pad)),
+            U.randomFromRange(minY, maxY)
+          )
+        );
+    }
+
+    spawnNewGhosts(count) {
+      let pad = this.stagePadding * 2;
+      let minY = this.height * 0.8;
+      let maxY = this.height - pad;
+      for(let i = 0; i < count; i++) {
+        this.ghosts.push(
+          new Ghost(
+            this.stage,
+            this.stagePadding + Math.round(Math.random() * (this.width - pad)),
+            U.randomFromRange(minY, maxY)
+          )
+        );
+      }
+    }
+
+    onResize() {
+      this.width = this.container.offsetWidth;
+      this.height = this.container.offsetHeight;
+      this.stage.attr({ width: this.width, height: this.height });
+      this.player.setY(this.height);
+    }
+
+    setupInputs() {
+      let keyDowns = Rx.Observable.fromEvent(document, 'keydown');
+      let keyUps = Rx.Observable.fromEvent(document, 'keyup');
+      this.keyPress = keyDowns
+        .merge(keyUps)
+        .filter(e => ['arrowright', 'arrowleft', 'a', 'd'].indexOf(e.key.toLowerCase()) >= 0)
+        .groupBy(e => e.keyCode)
+        .map(group => group.distinctUntilChanged(null, e => e.type))
+        .mergeAll();
+
+      this.keyPressSubscription = this.keyPress.subscribe(e => {
+        let type = e.type === 'keydown' ? 'go' : 'stop';
+        if(['arrowleft', 'a'].indexOf(e.key.toLowerCase()) >= 0) {
+          this[type + 'Left']();
+        }
+        if(['arrowright', 'd'].indexOf(e.key.toLowerCase()) >= 0) {
+          this[type + 'Right']();
+        }
+      });
+
+      // Mouse/touch inputs for dragging ghosts:
+      this.isDragging = false;
+
+      let mouseDowns = Rx.Observable.fromEvent(document, 'mousedown');
+      let mouseMoves = Rx.Observable.fromEvent(window, 'mousemove');
+      let mouseUps = Rx.Observable.fromEvent(window, 'mouseup');
+
+      let touchStarts = Rx.Observable.fromEvent(document, 'touchstart');
+      let touchMoves = Rx.Observable.fromEvent(document, 'touchmove');
+      let touchEnds = Rx.Observable.fromEvent(window, 'touchend');
+
+      this.mouseDownSubscription = mouseDowns.subscribe(e => {
+        let point = {x: e.clientX, y: e.clientY};
+        this.tryGrabGhost(point);
+      });
+      this.touchStartSubscription = touchStarts.subscribe(e => {
+        let touch = e.changedTouches[0];
+        let point = {x: touch.clientX, y: touch.clientY};
+        this.tryGrabGhost(point);
+      });
+
+      this.mouseMoveSubscription = mouseMoves.subscribe(e => {
+        if(this.isDragging && this.caughtGhost) {
+          this.caughtGhost.setTarget({x: e.clientX, y: e.clientY});
+        }
+      });
+      this.touchMoveSubscription = touchMoves.subscribe(e => {
+        if(this.isDragging && this.caughtGhost) {
+          let touch = e.changedTouches[0];
+          this.caughtGhost.setTarget({x: touch.clientX, y: touch.clientY});
+        }
+      });
+
+      this.mouseUpSubscription = mouseUps.subscribe(() => {
+        this.releaseGhost();
+      });
+      this.touchEndSubscription = touchEnds.subscribe(() => {
+        this.releaseGhost();
+      });
+    }
+
+    tryGrabGhost(point) {
+      for(let i = this.ghosts.length - 1; i >= 0; i--) {
+        let ghost = this.ghosts[i];
+        if(ghost.isHit(point)) {
+          this.caughtGhost = ghost;
+          this.isDragging = true;
+          this.caughtGhost.setTarget(point);
+          return;
+        }
+      }
+    }
+
+    releaseGhost() {
+      this.isDragging = false;
+      if(this.caughtGhost) this.caughtGhost.clearTarget();
+      this.caughtGhost = null;
+    }
+
+    goLeft() { this.setPlayerDirection(-this.PLAYER_SPEED, true); }
+    stopLeft() { this.setPlayerDirection(-this.PLAYER_SPEED); }
+    goRight() { this.setPlayerDirection(this.PLAYER_SPEED, true); }
+    stopRight() { this.setPlayerDirection(this.PLAYER_SPEED); }
+
+    setPlayerDirection(direction, go = false) {
+      if(go) this.playerTargetSpeed = direction;
+      else if(this.playerTargetSpeed == direction) this.playerTargetSpeed = 0;
+    }
+
+    tick(timestamp) {
+      if(this.gameOverFlag) return;
+
+      if(!this.startTimestamp) this.startTimestamp = timestamp;
+
+      if(this.playerCurrentSpeed > this.playerTargetSpeed) this.playerCurrentSpeed -= this.PLAYER_SPEED_STEP;
+      if(this.playerCurrentSpeed < this.playerTargetSpeed) this.playerCurrentSpeed += this.PLAYER_SPEED_STEP;
+
+      let targetX = this.player.x + this.playerCurrentSpeed;
+      let actualX = U.within(0, targetX, this.width - this.player.width);
+      this.player.setX(actualX);
+
+      if(targetX != actualX) {
+        let bounceBackSpeed = this.playerCurrentSpeed / 2;
+        this.playerCurrentSpeed = Math.round(bounceBackSpeed - bounceBackSpeed * 2);
+      }
+
+      for(let i = this.ghosts.length - 1; i >= 0; i--) {
+        let ghost = this.ghosts[i];
+        if(this.caughtGhost !== ghost) {
+          ghost.y -= 0.3;
+          ghost.draw();
+        } else {
+          ghost.draw(); // Draw dragged ghost as well
+        }
+
+        if(ghost.y + ghost.height / 2 < (this.height * 0.12)) {
+          this.gameOver();
+          return;
+        }
+      }
+
+      this.player.draw();
+
+      window.requestAnimationFrame((t) => this.tick(t));
+    }
+
+    gameOver() {
+      this.gameOverFlag = true;
+      this.stopTimer();
+      clearInterval(this.spawnInterval);
+      this.end();
+
+      let ghostsRemaining = this.ghosts.length;
+
+      document.getElementById('game-over-text').innerHTML = `
+        You Lose!<br />
+        Ghosts still trapped: ${ghostsRemaining}<br />
+      `;
+      document.getElementById('game-over').style.display = 'block';
+    }
+
+    winGame() {
+      this.gameOverFlag = true;
+      this.stopTimer();
+      clearInterval(this.spawnInterval);
+      this.end();
+
+      document.getElementById('game-over-text').innerHTML = `
+        You Win!<br />
+        You kept the ghosts from escaping! 🎉
+      `;
+      document.getElementById('game-over').style.display = 'block';
+    }
+
+    stopTimer() {
+      if(this.timerInterval) {
+        clearInterval(this.timerInterval);
+        this.timerInterval = null;
+      }
+    }
+
+    startTimer() {
+      this.updateTimerDisplay();
+      this.timerInterval = setInterval(() => {
+        if(this.gameOverFlag) {
+          this.stopTimer();
+          return;
+        }
+        this.remainingTime--;
+        this.updateTimerDisplay();
+
+        if(this.remainingTime <= 0) {
+          this.winGame();
+        }
+      }, 1000);
+    }
+
+    updateTimerDisplay() {
+      let minutes = Math.floor(this.remainingTime / 60);
+      let seconds = this.remainingTime % 60;
+      let formatted = `${minutes.toString().padStart(2,'0')}:${seconds.toString().padStart(2,'0')}`;
+      document.getElementById('timer').textContent = `Time Left: ${formatted}`;
+    }
+
+    end() {
+      if(this.keyPressSubscription) this.keyPressSubscription.unsubscribe();
+      if(this.mouseDownSubscription) this.mouseDownSubscription.unsubscribe();
+      if(this.mouseMoveSubscription) this.mouseMoveSubscription.unsubscribe();
+      if(this.mouseUpSubscription) this.mouseUpSubscription.unsubscribe();
+      if(this.touchStartSubscription) this.touchStartSubscription.unsubscribe();
+      if(this.touchMoveSubscription) this.touchMoveSubscription.unsubscribe();
+      if(this.touchEndSubscription) this.touchEndSubscription.unsubscribe();
+    }
+
+    restart() {
+      this.gameOverFlag = false;
+      this.ghostsSaved = 0;
+      this.ghosts.forEach(g => g.group.remove());
+      this.ghosts = [];
+      this.startTimestamp = null;
+      this.playerCurrentSpeed = 0;
+      this.playerTargetSpeed = 0;
+      this.caughtGhost = null;
+      this.isDragging = false;
+      this.remainingTime = this.totalTimeSeconds;
+      document.getElementById('game-over').style.display = 'none';
+
+      this.spawnInitialGhosts();
+
+      this.spawnInterval = setInterval(() => {
+        if(!this.gameOverFlag) this.spawnNewGhosts(2);
+      }, 10000);
+
+      this.start();
+    }
+
+    start() {
+      this.player.setX((this.width - this.player.width) / 2);
+
+      if(this.keyPressSubscription) this.keyPressSubscription.unsubscribe();
+      if(this.mouseDownSubscription) this.mouseDownSubscription.unsubscribe();
+      if(this.mouseMoveSubscription) this.mouseMoveSubscription.unsubscribe();
+      if(this.mouseUpSubscription) this.mouseUpSubscription.unsubscribe();
+      if(this.touchStartSubscription) this.touchStartSubscription.unsubscribe();
+      if(this.touchMoveSubscription) this.touchMoveSubscription.unsubscribe();
+      if(this.touchEndSubscription) this.touchEndSubscription.unsubscribe();
+
+      this.setupInputs();
+
+      this.gameOverFlag = false;
+      this.startTimestamp = null;
+      this.startTimer();
+
+      window.requestAnimationFrame((t) => this.tick(t));
+    }
+  }
+
+  class Ghost {
+    constructor(svg, x = 0, y = 0) {
+      this.lightningLines = [];
+      this.x = 0;
+      this.y = 0;
+      this.count = 0;
+      this.lerp = 20;
+      this.boltCount = 4;
+      this.boltRadius = 40;
+      this.bodyPoints = [
+        { type: 'M', x: 50, y: 0 },
+        { type: 'Q', x: 100, y: 0 },
+        { x: 100, y: 50 },
+        { type: 'L', x: 100, y: 100 },
+        { x: 84, y: 90 },
+        { x: 68, y: 100 },
+        { x: 52, y: 90 },
+        { x: 36, y: 100 },
+        { x: 20, y: 90 },
+        { x: 0, y: 100 },
+        { x: 0, y: 50 },
+        { type: 'Q', x: 0, y: 0 },
+        { x: 50, y: 0 },
+      ];
+      this.eyePoints = [
+        { type: 'M', x: 10, y: 0 },
+        { type: 'Q', x: 20, y: 0 },
+        { x: 20, y: 10 },
+        { x: 20, y: 20 },
+        { x: 10, y: 20 },
+        { x: 0, y: 20 },
+        { x: 0, y: 10 },
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+      ];
+      this.eyePointsShocked = [
+        { type: 'M', x: 15, y: 0 },
+        { type: 'Q', x: 30, y: 0 },
+        { x: 30, y: 15 },
+        { x: 30, y: 30 },
+        { x: 15, y: 30 },
+        { x: 0, y: 30 },
+        { x: 0, y: 15 },
+        { x: 0, y: 0 },
+        { x: 15, y: 0 },
+      ];
+      this.hitPoints = [
+        { type: 'M', x: 0, y: 0 },
+        { type: 'L', x: 100, y: 0 },
+        { x: 100, y: 100 },
+        { x: 0, y: 100 },
+      ];
+      let random = Math.round(Math.random() * 10);
+      this.width = 40 + random;
+      this.height = 55 + random;
+      this.svg = svg;
+      this.x = x;
+      this.y = y;
+      this.group = this.svg.group();
+      this.count = Math.random() * 100;
+      this.body = this.group.path();
+      this.body.attr({ fill: 'white', fillOpacity: 0.9 });
+      this.rightEye = this.group.path();
+      this.rightEye.attr({ fill: 'black' });
+      this.leftEye = this.group.path();
+      this.leftEye.attr({ fill: 'black' });
+      this.blurLines = this.group.group();
+      this.sharpLines = this.group.group();
+      this.blurFilter = this.svg.filter(Snap.filter.blur(7, 7));
+      this.blurLines.attr({ filter: this.blurFilter });
+      for (let i = 0; i < this.boltCount; i++) {
+        let line = i % 2 == 0 ? this.sharpLines.path() : this.blurLines.path();
+        line.attr({
+          fill: 'none',
+          strokeLinecap: 'round',
+          strokeOpacity: i % 2 == 0 ? 0.8 : 1,
+        });
+        this.lightningLines.push(line);
+      }
+      this.hitPath = this.group.path();
+      this.hitPath.attr({ fill: 'red', fillOpacity: 0 });
+      this.draw();
+
+      this.prevX = this.x;
+      this.prevY = this.y;
+    }
+    isHit(point) {
+      return Snap.path.isPointInside(this.hitPath.attr('d'), point.x, point.y);
+    }
+    setTarget(position) {
+      this.target = position;
+      this.prevX = this.x;
+      this.prevY = this.y;
+      this.x = position.x;
+      this.y = position.y;
+    }
+    clearTarget() {
+      this.target = null;
+    }
+    setXYFromTarget() {
+      if (!this.target) return;
+      this.x = this.target.x;
+      this.y = this.target.y;
+    }
+    draw() {
+      if (this.target) this.setXYFromTarget();
+      if (!this.target) {
+        this.count += 0.1;
+        this.x += Math.sin(this.count * 0.5);
+        this.y += Math.cos(this.count * 0.1);
+      }
+      let _x = this.x;
+      let _y = this.y;
+      this.hitPath.attr({
+        d: U.createPath(this.hitPoints, { x: _x - this.width / 2, y: _y - this.height / 2 }, { width: this.width, height: this.height }),
+      });
+      this.body.attr({
+        d: U.createPath(this.bodyPoints, { x: _x - this.width / 2, y: _y - this.height / 2 }, { width: this.width, height: this.height }),
+      });
+      this.rightEye.attr({
+        d: U.createPath(this.target ? this.eyePointsShocked : this.eyePoints, { x: _x + this.width / 4 - 8, y: _y - this.height / 4 }, { width: this.width, height: this.height }),
+      });
+      this.leftEye.attr({
+        d: U.createPath(this.target ? this.eyePointsShocked : this.eyePoints, { x: _x - this.width / 4, y: _y - this.height / 4 }, { width: this.width, height: this.height }),
+      });
+      for (let i = 0; i < this.lightningLines.length; i++) {
+        let lineString = '';
+        if (this.target) {
+          let points = 18;
+          let randomOffset = 4;
+          for (let j = 0; j < points; j++) {
+            let rand = Math.random() * points;
+            let x = this.x + U.randomFromRange(-randomOffset, randomOffset) + this.boltRadius * Math.cos((2 * Math.PI * j) / points);
+            let y = this.y + U.randomFromRange(-randomOffset, randomOffset) + this.boltRadius * Math.sin((2 * Math.PI * j) / points);
+            lineString += (j == 0 ? 'M ' : ' L ') + x + ' ' + y;
+          }
+          lineString += 'Z';
+        }
+        this.lightningLines[i].attr({
+          d: lineString,
+          stroke: U.colors[Math.floor(Math.random() * U.colors.length)],
+          strokeWidth: Math.random() * 3,
+        });
+      }
+    }
+  }
+
+  class Player {
+    constructor(svg) {
+      this.speedChangeX = [0];
+      this.x = 0;
+      this.y = 0;
+      this.width = 60;
+      this.height = 60;
+      this.setX = (newX) => {
+        this.speedChangeX.push(this.x - newX);
+        if (this.speedChangeX.length > 3) this.speedChangeX.shift();
+        this.x = newX;
+      };
+      this.setY = (newY) => (this.y = newY - this.height);
+      this.svg = svg;
+      this.group = this.svg.group();
+    }
+    draw() {
+      this.group.attr({ transform: U.translate(this.x, this.y) });
+    }
+  }
+
+  window.onload = () => {
+    window.game = new Game();
+    game.start();
+
+    document.getElementById('restart-btn').onclick = () => {
+      game.restart();
+    };
+  };
+</script>
+</body>
+</html>
